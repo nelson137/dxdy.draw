@@ -2,9 +2,13 @@
 // when, e.g., starting the app via file manager. Ignored on other platforms.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::sync::atomic::*;
+use std::sync::{Mutex, atomic::*};
 
 use anyhow::Result;
+use tracing::level_filters;
+use tracing_subscriber::{
+    Layer, layer::SubscriberExt, util::SubscriberInitExt,
+};
 
 slint::slint! {
     export component Ui inherits Window {
@@ -42,6 +46,23 @@ mod colors {
 
 type CanvasBuffer = slint::SharedPixelBuffer<Pixel>;
 
+static BUFFER: AtomicPtr<CanvasBuffer> = AtomicPtr::new(std::ptr::null_mut());
+// static BUFFER2: AtomicPtr<CanvasBuffer> = AtomicPtr::new(std::ptr::null_mut());
+
+fn set_buffers(buffer: CanvasBuffer, buffer2: CanvasBuffer) {
+    let buffer = Box::leak(Box::new(buffer));
+    // let buffer2 = Box::leak(Box::new(buffer2));
+    BUFFER.store(buffer, Ordering::Relaxed);
+    // BUFFER2.store(buffer2, Ordering::Relaxed);
+}
+
+#[tracing::instrument]
+fn get_and_swap_buffers_mut() -> &'static mut CanvasBuffer {
+    // let buffer2 = BUFFER2.load(Ordering::Relaxed);
+    // unsafe { &mut *BUFFER.swap(buffer2, Ordering::Relaxed) }
+    unsafe { &mut *BUFFER.load(Ordering::Relaxed) }
+}
+
 trait UiExts {
     fn new_canvas_buffer(&self) -> CanvasBuffer;
     fn set_canvas_from_buffer(&self, buffer: CanvasBuffer);
@@ -60,10 +81,17 @@ impl UiExts for Ui {
         self.set_canvas_source(source);
     }
 
+    #[tracing::instrument(skip_all)]
     fn update_canvas(&self, f: impl FnOnce(&mut CanvasBuffer)) {
-        let mut buffer = self.new_canvas_buffer();
-        f(&mut buffer);
-        self.set_canvas_from_buffer(buffer);
+        // let buffer = get_and_swap_buffers_mut();
+        static BUF: Mutex<Option<CanvasBuffer>> = Mutex::new(None);
+        let mut buffer = BUF.lock().unwrap();
+        if buffer.is_none() {
+            *buffer = Some(self.new_canvas_buffer());
+        }
+        let buffer = buffer.as_mut().unwrap();
+        f(buffer);
+        self.set_canvas_from_buffer(buffer.clone());
     }
 }
 
@@ -113,13 +141,33 @@ impl SetTimeout {
 }
 
 fn main() -> Result<()> {
+    let stdout_log = tracing_subscriber::fmt::layer().pretty();
+
+    let env_filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(level_filters::LevelFilter::INFO.into())
+        .from_env_lossy();
+
+    let tracy_layer = tracing_tracy::TracyLayer::default();
+
+    tracing_subscriber::registry()
+        .with(stdout_log.with_filter(env_filter))
+        .with(tracy_layer)
+        .init();
+
     let ui = Ui::new()?;
+
+    set_buffers(ui.new_canvas_buffer(), ui.new_canvas_buffer());
+    {
+        let buffer = unsafe { &*BUFFER.load(Ordering::Relaxed) };
+        println!("BUFFER: {:p}", buffer);
+    }
 
     static DOT_COLOR: AtomicBool = AtomicBool::new(true);
 
     SetTimeout::from_millis(750).run({
         let ui = ui.as_weak();
         move || {
+            let _frame = tracy_client::non_continuous_frame!("change color");
             DOT_COLOR.fetch_xor(true, Ordering::Relaxed);
             let ui = ui.upgrade().unwrap();
             ui.invoke_tick();
@@ -129,6 +177,8 @@ fn main() -> Result<()> {
     ui.on_render({
         let ui = ui.as_weak();
         move |t, mouse_x, mouse_y| {
+            let _span = tracy_client::span!("render");
+
             static LAST_T: AtomicI64 = AtomicI64::new(0);
             let last_t = LAST_T.load(Ordering::Relaxed);
             if t <= last_t || t - last_t < 24 {
@@ -141,6 +191,8 @@ fn main() -> Result<()> {
             let hover = ui.get_canvas_has_hover();
 
             ui.update_canvas(|buffer| {
+                let _span = tracy_client::span!("update");
+
                 let (mouse_x, mouse_y) =
                     buffer.coords(mouse_x as isize, mouse_y as isize);
 
@@ -149,6 +201,8 @@ fn main() -> Result<()> {
                 } else {
                     colors::RED
                 };
+
+                println!("{:p}", buffer);
 
                 let width = buffer.width() as isize;
                 buffer.iter_pixels(width, |pixel, (x, y)| {
@@ -164,6 +218,7 @@ fn main() -> Result<()> {
         }
     });
 
+    tracing::info!("Running application");
     ui.run()?;
 
     Ok(())
