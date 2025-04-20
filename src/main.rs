@@ -1,144 +1,35 @@
-// Prevent console window in addition to Slint window in Windows release builds
-// when, e.g., starting the app via file manager. Ignored on other platforms.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-use std::sync::{Mutex, atomic::*};
+use std::{
+    f64::consts::TAU,
+    sync::{
+        RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use anyhow::Result;
+use gtk::{cairo, gdk, glib, prelude::*};
 use tracing::level_filters;
 use tracing_subscriber::{
     Layer, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
-slint::slint! {
-    export component Ui inherits Window {
-        in property <image> canvas_source <=> canvas.source;
+const APP_ID: &str = "com.nelsonearle.dxdy.draw";
 
-        out property <length> canvas-width <=> canvas.width;
-        out property <length> canvas-height <=> canvas.height;
-        out property <bool> canvas-has-hover <=> touch-area.has-hover;
+#[derive(Clone, Copy)]
+struct Pos {
+    x: f64,
+    y: f64,
+}
 
-        callback render(duration, length, length);
-        public function tick() {
-            render(animation-tick(), touch-area.mouse-x, touch-area.mouse-y);
-        }
-
-        touch-area := TouchArea {
-            changed mouse-x => { root.tick(); }
-            changed mouse-y => { root.tick(); }
-
-            canvas := Image {
-                width: 800px;
-                height: 600px;
-            }
-        }
+impl Pos {
+    fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
     }
 }
 
-type Pixel = slint::Rgb8Pixel;
+static CURSOR_POSITION: RwLock<Option<Pos>> = RwLock::new(None);
 
-mod colors {
-    use super::Pixel;
-    pub(crate) const BLACK: Pixel = Pixel::new(0x00, 0x00, 0x00);
-    pub(crate) const BLUE: Pixel = Pixel::new(0x60, 0x60, 0xff);
-    pub(crate) const RED: Pixel = Pixel::new(0xff, 0x60, 0x60);
-}
-
-type CanvasBuffer = slint::SharedPixelBuffer<Pixel>;
-
-static BUFFER: AtomicPtr<CanvasBuffer> = AtomicPtr::new(std::ptr::null_mut());
-// static BUFFER2: AtomicPtr<CanvasBuffer> = AtomicPtr::new(std::ptr::null_mut());
-
-fn set_buffers(buffer: CanvasBuffer, buffer2: CanvasBuffer) {
-    let buffer = Box::leak(Box::new(buffer));
-    // let buffer2 = Box::leak(Box::new(buffer2));
-    BUFFER.store(buffer, Ordering::Relaxed);
-    // BUFFER2.store(buffer2, Ordering::Relaxed);
-}
-
-#[tracing::instrument]
-fn get_and_swap_buffers_mut() -> &'static mut CanvasBuffer {
-    // let buffer2 = BUFFER2.load(Ordering::Relaxed);
-    // unsafe { &mut *BUFFER.swap(buffer2, Ordering::Relaxed) }
-    unsafe { &mut *BUFFER.load(Ordering::Relaxed) }
-}
-
-trait UiExts {
-    fn new_canvas_buffer(&self) -> CanvasBuffer;
-    fn set_canvas_from_buffer(&self, buffer: CanvasBuffer);
-    fn update_canvas(&self, f: impl FnOnce(&mut CanvasBuffer));
-}
-
-impl UiExts for Ui {
-    fn new_canvas_buffer(&self) -> CanvasBuffer {
-        let width = self.get_canvas_width() as u32;
-        let height = self.get_canvas_height() as u32;
-        CanvasBuffer::new(width, height)
-    }
-
-    fn set_canvas_from_buffer(&self, buffer: CanvasBuffer) {
-        let source = slint::Image::from_rgb8(buffer);
-        self.set_canvas_source(source);
-    }
-
-    #[tracing::instrument(skip_all)]
-    fn update_canvas(&self, f: impl FnOnce(&mut CanvasBuffer)) {
-        // let buffer = get_and_swap_buffers_mut();
-        static BUF: Mutex<Option<CanvasBuffer>> = Mutex::new(None);
-        let mut buffer = BUF.lock().unwrap();
-        if buffer.is_none() {
-            *buffer = Some(self.new_canvas_buffer());
-        }
-        let buffer = buffer.as_mut().unwrap();
-        f(buffer);
-        self.set_canvas_from_buffer(buffer.clone());
-    }
-}
-
-trait CanvasBufferExts {
-    fn coords(&self, x: isize, y: isize) -> (isize, isize);
-    fn iter_pixels(
-        &mut self,
-        width: isize,
-        f: impl FnMut(&mut Pixel, (isize, isize)),
-    );
-}
-
-impl CanvasBufferExts for CanvasBuffer {
-    fn coords(&self, x: isize, y: isize) -> (isize, isize) {
-        let x = x - self.width() as isize / 2;
-        let y = self.height() as isize / 2 - y;
-        (x, y)
-    }
-
-    fn iter_pixels(
-        &mut self,
-        width: isize,
-        mut f: impl FnMut(&mut Pixel, (isize, isize)),
-    ) {
-        let half_width = self.width() as isize / 2;
-        let half_height = self.height() as isize / 2;
-        for (i, pixel) in self.make_mut_slice().iter_mut().enumerate() {
-            let x = (i as isize % width) - half_width;
-            let y = half_height - (i as isize / width);
-            f(pixel, (x, y));
-        }
-    }
-}
-
-struct SetTimeout(pub(crate) std::time::Duration);
-
-impl SetTimeout {
-    fn from_millis(millis: u64) -> Self {
-        Self(std::time::Duration::from_millis(millis))
-    }
-
-    fn run(self, mut callback: impl FnMut() + 'static) {
-        callback();
-        let timer = Box::leak(Box::new(slint::Timer::default()));
-        timer.start(slint::TimerMode::Repeated, self.0, callback);
-    }
-}
+static CURSOR_COLOR: AtomicBool = AtomicBool::new(true);
 
 fn main() -> Result<()> {
     let stdout_log = tracing_subscriber::fmt::layer().pretty();
@@ -154,72 +45,166 @@ fn main() -> Result<()> {
         .with(tracy_layer)
         .init();
 
-    let ui = Ui::new()?;
+    let app = gtk::Application::builder().application_id(APP_ID).build();
+    app.connect_activate(cb_activate);
 
-    set_buffers(ui.new_canvas_buffer(), ui.new_canvas_buffer());
-    {
-        let buffer = unsafe { &*BUFFER.load(Ordering::Relaxed) };
-        println!("BUFFER: {:p}", buffer);
+    let exit_code = app.run_with_args(&[] as &[&str]);
+    if exit_code != glib::ExitCode::SUCCESS {
+        eprintln!("{exit_code:?}");
     }
 
-    static DOT_COLOR: AtomicBool = AtomicBool::new(true);
+    Ok(())
+}
 
-    SetTimeout::from_millis(750).run({
-        let ui = ui.as_weak();
-        move || {
-            let _frame = tracy_client::non_continuous_frame!("change color");
-            DOT_COLOR.fetch_xor(true, Ordering::Relaxed);
-            let ui = ui.upgrade().unwrap();
-            ui.invoke_tick();
+fn eat_err(r: Result<()>) {
+    if let Err(err) = r {
+        glib::g_error!("dxdy.draw", "{err}");
+    }
+}
+
+fn cb_activate(app: &gtk::Application) {
+    // Drawing Area
+
+    let drawing_area = gtk::DrawingArea::builder()
+        .content_width(800)
+        .content_height(600)
+        .build();
+
+    // Window
+
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title("DxDy Draw")
+        .default_width(800)
+        .default_height(600)
+        .resizable(false)
+        .child(&drawing_area)
+        .build();
+
+    // Draw
+
+    drawing_area.set_draw_func(glib::clone!(
+        move |widget, ctx, w, h| eat_err(draw(widget, ctx, w, h))
+    ));
+
+    // Key Press
+
+    let key_controller = gtk::EventControllerKey::new();
+    key_controller.connect_key_pressed(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |controller, keyval, keycode, modifier| {
+            cb_key_pressed(app, controller, keyval, keycode, modifier)
         }
-    });
+    ));
+    window.add_controller(key_controller);
 
-    ui.on_render({
-        let ui = ui.as_weak();
-        move |t, mouse_x, mouse_y| {
-            let _span = tracy_client::span!("render");
+    // Cursor Position
 
-            static LAST_T: AtomicI64 = AtomicI64::new(0);
-            let last_t = LAST_T.load(Ordering::Relaxed);
-            if t <= last_t || t - last_t < 24 {
-                return;
+    fn get_pointer_position(
+        window: gtk::ApplicationWindow,
+    ) -> Option<(Pos, gdk::ModifierType)> {
+        let display = gdk::Display::default().unwrap();
+        let pointer = display.default_seat().unwrap().pointer().unwrap();
+        let surface = window.root().unwrap().surface().unwrap();
+        surface
+            .device_position(&pointer)
+            .map(|(x, y, modt)| (Pos::new(x, y), modt))
+    }
+
+    glib::timeout_add_local(
+        std::time::Duration::from_millis(20),
+        glib::clone!(
+            #[weak]
+            window,
+            #[weak]
+            drawing_area,
+            #[upgrade_or]
+            glib::ControlFlow::Continue,
+            move || {
+                match get_pointer_position(window) {
+                    Some((pos, _)) => {
+                        *CURSOR_POSITION.write().unwrap() = Some(pos);
+                    }
+                    None => {
+                        *CURSOR_POSITION.write().unwrap() = None;
+                    }
+                }
+                drawing_area.queue_draw();
+                glib::ControlFlow::Continue
             }
-            LAST_T.store(t, Ordering::Relaxed);
+        ),
+    );
 
-            let ui = ui.upgrade().unwrap();
+    // Cursor Color
 
-            let hover = ui.get_canvas_has_hover();
+    glib::timeout_add_local(
+        std::time::Duration::from_millis(750),
+        glib::clone!(move || {
+            CURSOR_COLOR.fetch_xor(true, Ordering::Relaxed);
+            glib::ControlFlow::Continue
+        }),
+    );
 
-            ui.update_canvas(|buffer| {
-                let _span = tracy_client::span!("update");
+    // Present
 
-                let (mouse_x, mouse_y) =
-                    buffer.coords(mouse_x as isize, mouse_y as isize);
+    window.present();
+}
 
-                let color_dot = if DOT_COLOR.load(Ordering::Relaxed) {
-                    colors::BLUE
-                } else {
-                    colors::RED
-                };
+fn cb_key_pressed(
+    app: gtk::Application,
+    _controller: &gtk::EventControllerKey,
+    keyval: gdk::Key,
+    _keycode: u32,
+    modifier: gdk::ModifierType,
+) -> glib::Propagation {
+    if modifier == gdk::ModifierType::META_MASK && keyval == gdk::Key::q {
+        app.quit();
+    }
 
-                println!("{:p}", buffer);
+    glib::Propagation::Proceed
+}
 
-                let width = buffer.width() as isize;
-                buffer.iter_pixels(width, |pixel, (x, y)| {
-                    let (x, y) = (x - mouse_x, y - mouse_y);
-                    const R: isize = 32;
-                    *pixel = if hover && x * x + y * y < R * R {
-                        color_dot
-                    } else {
-                        colors::BLACK
-                    };
-                });
-            });
-        }
-    });
+mod colors {
+    use gtk::gdk::RGBA;
 
-    tracing::info!("Running application");
-    ui.run()?;
+    const fn f(b: u8) -> f32 {
+        b as f32 / u8::MAX as f32
+    }
+
+    pub(crate) static BLUE: RGBA = RGBA::new(f(0x60), f(0x60), f(0xff), 1.);
+    pub(crate) static RED: RGBA = RGBA::new(f(0xff), f(0x60), f(0x60), 1.);
+
+    pub(crate) static BG: RGBA = RGBA::new(0.2, 0.2, 0.2, 1.);
+    pub(crate) static CURSOR1: RGBA = BLUE;
+    pub(crate) static CURSOR2: RGBA = RED;
+}
+
+mod sizes {
+    pub(crate) static CURSOR_RADIUS: f64 = 32.;
+}
+
+fn draw(
+    _widget: &gtk::DrawingArea,
+    ctx: &cairo::Context,
+    width: i32,
+    height: i32,
+) -> Result<()> {
+    ctx.set_source_color(&colors::BG);
+    ctx.rectangle(0.0, 0.0, width as f64, height as f64);
+    ctx.fill()?;
+
+    if let Some(pos) = *CURSOR_POSITION.read().unwrap() {
+        ctx.arc(pos.x, pos.y, sizes::CURSOR_RADIUS, 0., TAU);
+        ctx.set_source_color(if CURSOR_COLOR.load(Ordering::Relaxed) {
+            &colors::CURSOR1
+        } else {
+            &colors::CURSOR2
+        });
+        ctx.fill()?;
+    }
 
     Ok(())
 }

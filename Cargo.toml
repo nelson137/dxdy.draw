@@ -6,7 +6,7 @@ rust-version = "1.86"
 
 [dependencies]
 anyhow = "1.0"
-slint = "1.10"
+gtk = { version = "0.9.5", package = "gtk4", features = ["v4_16"] }
 tracing = { version = "0.1", features = ["max_level_trace", "release_max_level_info"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-tracy = "=0.11"
