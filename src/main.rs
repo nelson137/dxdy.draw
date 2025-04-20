@@ -13,23 +13,19 @@ use tracing_subscriber::{
     Layer, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
+mod pos;
+mod shape;
+
+use pos::*;
+use shape::*;
+
 const APP_ID: &str = "com.nelsonearle.dxdy.draw";
-
-#[derive(Clone, Copy)]
-struct Pos {
-    x: f64,
-    y: f64,
-}
-
-impl Pos {
-    fn new(x: f64, y: f64) -> Self {
-        Self { x, y }
-    }
-}
 
 static CURSOR_POSITION: RwLock<Option<Pos>> = RwLock::new(None);
 
 static CURSOR_COLOR: AtomicBool = AtomicBool::new(true);
+
+static CURRENT_SHAPE: RwLock<Shape> = RwLock::new(Shape::new());
 
 fn main() -> Result<()> {
     let stdout_log = tracing_subscriber::fmt::layer().pretty();
@@ -101,6 +97,34 @@ fn cb_activate(app: &gtk::Application) {
     ));
     window.add_controller(key_controller);
 
+    // Drag Gesture
+
+    let gesture_drag = gtk::GestureDrag::new();
+    gesture_drag.set_button(gdk::BUTTON_PRIMARY);
+
+    gesture_drag.connect_drag_begin(|gesture, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        *CURRENT_SHAPE.write().unwrap() = Shape::from_pos(x, y);
+    });
+
+    gesture_drag.connect_drag_update(|gesture, _dx, _dy| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if let Some((dx, dy)) = gesture.offset() {
+            CURRENT_SHAPE.write().unwrap().next_vertex(dx, dy);
+        }
+    });
+
+    gesture_drag.connect_drag_end(|gesture, _dx, _dy| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if let Some((dx, dy)) = gesture.offset() {
+            let mut current_shape = CURRENT_SHAPE.write().unwrap();
+            current_shape.next_vertex(dx, dy);
+            ALL_SHAPES.write().unwrap().push(current_shape.clone());
+        }
+    });
+
+    window.add_controller(gesture_drag);
+
     // Cursor Position
 
     fn get_pointer_position(
@@ -162,6 +186,9 @@ fn cb_key_pressed(
 ) -> glib::Propagation {
     if modifier == gdk::ModifierType::META_MASK && keyval == gdk::Key::q {
         app.quit();
+    } else if keyval == gdk::Key::BackSpace {
+        ALL_SHAPES.write().unwrap().clear();
+        *CURRENT_SHAPE.write().unwrap() = Shape::new();
     }
 
     glib::Propagation::Proceed
@@ -183,7 +210,7 @@ mod colors {
 }
 
 mod sizes {
-    pub(crate) static CURSOR_RADIUS: f64 = 32.;
+    pub(crate) static CURSOR_RADIUS: f64 = 4.;
 }
 
 fn draw(
@@ -196,14 +223,45 @@ fn draw(
     ctx.rectangle(0.0, 0.0, width as f64, height as f64);
     ctx.fill()?;
 
+    let (color, color_opposite) = if CURSOR_COLOR.load(Ordering::Relaxed) {
+        (&colors::CURSOR1, &colors::CURSOR2)
+    } else {
+        (&colors::CURSOR2, &colors::CURSOR1)
+    };
+
+    ctx.set_source_color(color);
+
     if let Some(pos) = *CURSOR_POSITION.read().unwrap() {
         ctx.arc(pos.x, pos.y, sizes::CURSOR_RADIUS, 0., TAU);
-        ctx.set_source_color(if CURSOR_COLOR.load(Ordering::Relaxed) {
-            &colors::CURSOR1
-        } else {
-            &colors::CURSOR2
-        });
         ctx.fill()?;
+    }
+
+    {
+        let shape = CURRENT_SHAPE.read().unwrap();
+        let start = shape.start();
+        ctx.new_path();
+        ctx.move_to(start.x, start.y);
+        for offset in shape.verticies() {
+            let x = start.x + offset.dx;
+            let y = start.y + offset.dy;
+            ctx.line_to(x, y);
+        }
+        ctx.stroke()?;
+    }
+
+    ctx.set_source_color(color_opposite);
+
+    for shape in ALL_SHAPES.read().unwrap().iter() {
+        let start = shape.start();
+        ctx.new_path();
+        ctx.move_to(start.x, start.y);
+        for offset in shape.verticies() {
+            let x = start.x + offset.dx;
+            let y = start.y + offset.dy;
+            ctx.line_to(x, y);
+        }
+        ctx.close_path();
+        ctx.stroke()?;
     }
 
     Ok(())
