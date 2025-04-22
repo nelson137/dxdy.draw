@@ -2,7 +2,7 @@ use std::{
     f64::consts::TAU,
     sync::{
         RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -107,10 +107,32 @@ fn cb_activate(app: &gtk::Application) {
         *CURRENT_SHAPE.write().unwrap() = Shape::from_pos(x, y);
     });
 
+    static DRAG_APP_START: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
+    _ = *DRAG_APP_START;
+
+    static DRAG_LAST_UPDATE: AtomicU64 = AtomicU64::new(0);
+
     gesture_drag.connect_drag_update(|gesture, _dx, _dy| {
         gesture.set_state(gtk::EventSequenceState::Claimed);
+
+        let t = DRAG_APP_START.elapsed().as_millis() as u64;
+        if t - DRAG_LAST_UPDATE.load(Ordering::Relaxed) < 50 {
+            return;
+        }
+        DRAG_LAST_UPDATE.store(t, Ordering::Relaxed);
+
         if let Some((dx, dy)) = gesture.offset() {
-            CURRENT_SHAPE.write().unwrap().next_vertex(dx, dy);
+            let offset = PosOffset::new(dx, dy);
+            let mut current_shape = CURRENT_SHAPE.write().unwrap();
+
+            let last_offset = current_shape.last_offset();
+            let dist_to_last = (offset - last_offset).dist2();
+            if dist_to_last < 400. {
+                return;
+            }
+
+            current_shape.next_vertex_at(offset);
         }
     });
 
@@ -201,6 +223,7 @@ mod colors {
         b as f32 / u8::MAX as f32
     }
 
+    pub(crate) static WHITE: RGBA = RGBA::new(f(0xff), f(0xff), f(0xff), 1.);
     pub(crate) static BLUE: RGBA = RGBA::new(f(0x60), f(0x60), f(0xff), 1.);
     pub(crate) static RED: RGBA = RGBA::new(f(0xff), f(0x60), f(0x60), 1.);
 
@@ -249,12 +272,12 @@ fn draw(
         ctx.stroke()?;
     }
 
-    ctx.set_source_color(color_opposite);
-
     for shape in ALL_SHAPES.read().unwrap().iter() {
         let start = shape.start();
+
+        ctx.set_source_color(color_opposite);
+        ctx.set_line_width(4.);
         ctx.new_path();
-        ctx.move_to(start.x, start.y);
         for offset in shape.verticies() {
             let x = start.x + offset.dx;
             let y = start.y + offset.dy;
@@ -262,6 +285,15 @@ fn draw(
         }
         ctx.close_path();
         ctx.stroke()?;
+
+        ctx.set_source_color(&colors::WHITE);
+        ctx.set_line_width(1.);
+        for offset in shape.verticies() {
+            let x = start.x + offset.dx;
+            let y = start.y + offset.dy;
+            ctx.arc(x, y, 1.5, 0., TAU);
+            ctx.stroke()?;
+        }
     }
 
     Ok(())

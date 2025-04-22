@@ -19,12 +19,16 @@ impl Shape {
     pub(crate) fn from_pos(x: f64, y: f64) -> Self {
         Self {
             start: Pos::new(x, y),
-            verticies: Vec::new(),
+            verticies: vec![PosOffset::ZERO],
         }
     }
 
     pub(crate) fn start(&self) -> Pos {
         self.start
+    }
+
+    pub(crate) fn last_offset(&self) -> PosOffset {
+        self.verticies().last().unwrap()
     }
 
     pub(crate) fn verticies(&self) -> impl Iterator<Item = PosOffset> {
@@ -33,6 +37,10 @@ impl Shape {
 
     pub(crate) fn next_vertex(&mut self, x: f64, y: f64) {
         self.verticies.push(PosOffset::new(x, y));
+    }
+
+    pub(crate) fn next_vertex_at(&mut self, offset: PosOffset) {
+        self.verticies.push(offset);
     }
 }
 
