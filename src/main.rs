@@ -13,6 +13,7 @@ use tracing_subscriber::{
     Layer, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
+mod algorithm;
 mod pos;
 mod shape;
 
