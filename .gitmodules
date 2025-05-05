@@ -1,9 +1,9 @@
 [submodule "reference/differential-line"]
 	path = reference/differential-line
-	url = https://github.com/inconvergent/differential-line.git
+	url = https://github.com/nelson137/differential-line.git
 [submodule "reference/iutils"]
 	path = reference/iutils
-	url = https://github.com/inconvergent/iutils.git
+	url = https://github.com/nelson137/iutils.git
 [submodule "reference/zonemap"]
 	path = reference/zonemap
-	url = https://github.com/inconvergent/zonemap.git
+	url = https://github.com/nelson137/zonemap.git
