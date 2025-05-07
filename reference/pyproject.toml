@@ -8,5 +8,6 @@ dependencies = [
     "cython>=3.0.12",
     "numpy>=2.2.5",
     "pycairo>=1.28.0",
+    "pygobject>=3.52.3",
     "setuptools>=80.3.1",
 ]
